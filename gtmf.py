@@ -24,7 +24,7 @@ class MetadataParser(ABC):
 
     @classmethod
     @abstractmethod
-    def create(cls, metadata_path: Path) -> None | Self:
+    def create(cls, metadata_path: Path, allow_unmatched_primary_path: bool) -> None | Self:
         pass
 
     @abstractmethod
@@ -45,7 +45,7 @@ class JsonParser(MetadataParser):
         return ['.json']
 
     @classmethod
-    def create(cls, metadata_path: Path) -> None | Self:
+    def create(cls, metadata_path: Path, allow_unmatched_primary_path: bool) -> None | Self:
         try:
             data: None | dict[str, Any] = json.loads(metadata_path.read_text())
             if data == None:
@@ -59,8 +59,12 @@ class JsonParser(MetadataParser):
             if primary_path.exists():
                 return cls(metadata_path, primary_path, data)
 
-            primary_path = primary_path.parent
+            primary_path = metadata_path.parent.parent.joinpath(title)
             if primary_path.exists():
+                return cls(metadata_path, primary_path, data)
+
+            if allow_unmatched_primary_path:
+                primary_path = metadata_path.parent.joinpath(title)
                 return cls(metadata_path, primary_path, data)
 
             return None
@@ -90,8 +94,11 @@ class JsonParser(MetadataParser):
         return False
 
     def apply_modify_timestamp(self, timestamp: float) -> bool:
-        os.utime(self.primary_path, (timestamp, timestamp))
-        return True
+        if self.primary_path.exists():
+            os.utime(self.primary_path, (timestamp, timestamp))
+            return True
+        
+        return False
 
 
 class CommentsHtmlParser(MetadataParser):
@@ -117,7 +124,7 @@ class CommentsHtmlParser(MetadataParser):
         return ['.html']
 
     @classmethod
-    def create(cls, metadata_path: Path) -> None | Self:
+    def create(cls, metadata_path: Path, allow_unmatched_primary_path: bool) -> None | Self:
         try:
             parser = CommentsHtmlParser.TitleParser()
             parser.feed(metadata_path.read_text())
@@ -127,16 +134,19 @@ class CommentsHtmlParser(MetadataParser):
                 return None
 
             primary_path = metadata_path.parent.joinpath(title)
-            if not primary_path.exists():
-                return None
+            if primary_path.exists():
+                return cls(metadata_path, primary_path)
 
-            return cls(metadata_path, primary_path)
+            if allow_unmatched_primary_path:
+                return cls(metadata_path, primary_path)
+
+            return None
 
         except Exception:
             return None
 
     def apply_metadata_to_primary(self) -> bool:
-        return True
+        return self.primary_path.exists()
 
 
 metadata_parsers: list[Type[MetadataParser]] = [
@@ -145,7 +155,7 @@ metadata_parsers: list[Type[MetadataParser]] = [
 ]
 
 
-def fix_metadata(source_directory: Path, metadata_destination_directory: None | Path):
+def fix_metadata(source_directory: Path, metadata_destination_directory: None | Path, move_for_missing_primary: bool) -> None:
 
     for directory in get_depth_first_directories(source_directory):
 
@@ -161,20 +171,28 @@ def fix_metadata(source_directory: Path, metadata_destination_directory: None | 
             for parser_cls in metadata_parsers
             for suffix in parser_cls.get_compatible_suffixes()
             if metadata_name.endswith(suffix)
-            if (parser := parser_cls.create(metadata_path)) is not None
+            if (parser := parser_cls.create(metadata_path, move_for_missing_primary)) is not None
         ]
 
         for metadata_parser in parsers:
             try:
                 is_applied = metadata_parser.apply_metadata_to_primary()
-                if is_applied and metadata_destination_directory:
+
+                if is_applied:
+                    print(
+                        f'Fixed metadata for {metadata_parser.primary_path} with {metadata_parser.metadata_path}'
+                    )
+                
+                if is_applied and metadata_destination_directory or move_for_missing_primary:
+
+                    assert isinstance(metadata_destination_directory, Path)
+
                     metadata_parser.metadata_path = move_metadata_file(
                         metadata_parser.metadata_path,
                         source_directory,
                         metadata_destination_directory,
                     )
-                print(
-                    f'Fixed metadata for {metadata_parser.primary_path} with {metadata_parser.metadata_path}')
+
             except Exception as e:
                 print(metadata_parser.metadata_path, repr(e), file=sys.stderr)
 
@@ -214,6 +232,12 @@ def main():
         help='optional path to root directory where the metadata will be moved to',
         nargs='?',
     )
+    parser.add_argument(
+        '-u'
+        '--move-unmatched',
+        action='store_true',
+        help="move metadata files for which the primary file don't exist",
+    )
     parsed_args = parser.parse_args()
     
     # parse and check source_directory
@@ -226,10 +250,15 @@ def main():
     if parsed_args.metadata_destination_directory is not None:
         metadata_destination_directory = Path(parsed_args.metadata_destination_directory)
         metadata_destination_directory.mkdir(parents=True, exist_ok=True)
-        assert metadata_destination_directory.is_dir(), 'metadata_destination_directory must be a directory'    
+        assert metadata_destination_directory.is_dir(), 'metadata_destination_directory must be a directory' 
+
+    move_unmatched: bool = parsed_args.u__move_unmatched
+    if move_unmatched:
+        assert metadata_destination_directory is not None, \
+            'move_unmatched requires metadata_destination_directory'
 
     # fix metadata
-    fix_metadata(source_directory, metadata_destination_directory)
+    fix_metadata(source_directory, metadata_destination_directory, move_unmatched)
 
 
 if __name__ == '__main__':

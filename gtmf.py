@@ -47,26 +47,36 @@ class JsonParser(MetadataParser):
     @classmethod
     def create(cls, metadata_path: Path, allow_unmatched_primary_path: bool) -> None | Self:
         try:
+            # parse json
             data: None | dict[str, Any] = json.loads(metadata_path.read_text())
             if data == None:
                 return None
 
-            title = data.get('title', None)
+            # get title
+            title: str|None = data.get('title', None) or data.get('albumData', []).get('title', None)
             if title is None:
                 return None
+            
+            # replace characters that are not allowed in file names
+            title = title.replace('\u0027', '_')
+            title = title.replace('/', '-')
 
+            # check if file with title exist
             primary_path = metadata_path.parent.joinpath(title)
             if primary_path.exists():
                 return cls(metadata_path, primary_path, data)
 
-            primary_path = metadata_path.parent.parent.joinpath(title)
-            if primary_path.exists():
+            # check if current folder name matches title
+            primary_path = metadata_path.parent
+            if primary_path.name == title:
                 return cls(metadata_path, primary_path, data)
 
+            # check if unmatched primary path is allowed
             if allow_unmatched_primary_path:
                 primary_path = metadata_path.parent.joinpath(title)
                 return cls(metadata_path, primary_path, data)
 
+            # unable to match title to a file or directory
             return None
 
         except Exception:
@@ -81,12 +91,19 @@ class JsonParser(MetadataParser):
                 )
                 return self.apply_modify_timestamp(timestamp.timestamp())
 
+            # photoTakenTime.timestamp
             if 'photoTakenTime' in self.data and 'timestamp' in self.data['photoTakenTime']:
                 timestamp = float(self.data['photoTakenTime']['timestamp'])
                 return self.apply_modify_timestamp(timestamp)
 
+            # date.timestamp
             if 'date' in self.data and 'timestamp' in self.data['date']:
                 timestamp = float(self.data['date']['timestamp'])
+                return self.apply_modify_timestamp(timestamp)
+
+            # albumData.date.timestamp
+            if 'albumData' in self.data and 'date' in self.data['albumData'] and 'timestamp' in self.data['albumData']['date']:
+                timestamp = float(self.data['albumData']['date']['timestamp'])
                 return self.apply_modify_timestamp(timestamp)
 
         except Exception:
